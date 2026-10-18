@@ -33,6 +33,7 @@ Name = None
 Type = "Statics"
 ExportType = "Map" # Default
 Game = TigerGame.DESTINY
+ImportCollection = None # collection of the current non-map import
 
 # Yes I shamelessly let chaptgpt help me redo a lot of this
 # Fuck blender python, its awful in my very personal opinion
@@ -156,14 +157,16 @@ class ImportDestinyCfg(Operator, ImportHelper):
         box2.prop(self, 'debug_logs')
         
     def execute(self, context):
-        global Cfg, Game, Name, Type, ExportType, FilePath, AssetsPath, print_debug_logs
+        global Cfg, Game, Name, Type, ExportType, FilePath, AssetsPath, ImportCollection, print_debug_logs
         Cfg = None
+        ImportCollection = None
         FilePath = None
         AssetsPath = None
         Name = None
         Type = "Statics"
         ExportType = "Map"
         print_debug_logs = self.debug_logs
+        pending_attachments.clear()
 
         start_time = time.time()
         # Deselect all objects just in case
@@ -181,8 +184,10 @@ class ImportDestinyCfg(Operator, ImportHelper):
             prepare_and_process_map(self, sorted_files)
             
             # This does the actual instancing after everything needed has been imported
-            process_instancing(self, sorted_files)    
-            
+            process_instancing(self, sorted_files)
+
+            apply_attachments()
+
             if self.import_lights:
                 add_lights(self)
 
@@ -293,13 +298,12 @@ def DoImport(self):
 
     else:
         # Make a collection with the name of the imported fbx for the objects
-        if bpy.data.collections.get(str(Name)):
+        collection = GetImportCollection()
+        if collection is None:
             Helpers.log(f"Collection {str(Name)} already exists, skipping...")
             return
 
-        bpy.data.collections.new(str(Name))
-        bpy.context.scene.collection.children.link(bpy.data.collections[str(Name)])
-        bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection.children[str(Name)]
+        bpy.context.view_layer.active_layer_collection = FindLayerCollection(bpy.context.view_layer.layer_collection, collection)
 
         # Import single FBX if not a map
         mesh_file = os.path.join(f'{AssetsPath}', f'{Cfg["MeshName"]}.fbx')
@@ -334,15 +338,23 @@ def DoImport(self):
                         obj.rotation_mode = 'QUATERNION'
                         obj.rotation_quaternion = quat @ obj.rotation_quaternion
 
+            # Entity children that follow a bone on their parent, attached once everything is imported
+            if "Parent" in Cfg:
+                queue_attachment()
+
 
     # Assign materials if enabled
     if self.use_import_materials:
         assign_materials()
-        if Is_Gear:
+        if Is_Gear(Type):
             assign_gear_shader()
 
     if self.rename_bones or Is_Gear(Type) or Is_Anim(Type):
         fix_dupe_bones()
+
+    # Weapons also have their first person rig and its animations
+    if Is_Gear(Type) and self.import_animations:
+        import_first_person_rig(self)
 
     # Add terrain dyemaps if applicable
     if "Terrain" in Type and "TerrainDyemaps" in Cfg:

@@ -11,6 +11,7 @@ def import_marathon_weapon():
     Helpers.log(f"Importing Marathon Weapon {globals.Name}")
     parent_armature = None
     attachment_counter = 0
+    lookup = Helpers.GetPartObjectLookup()
     for name, mesh in sorted(globals.Cfg["Parts"].items(), key=lambda item: item[1]["SubType"]):
         subtype = mesh["SubType"]
         attachment_bone_index = mesh["AttachmentBoneIndex"]
@@ -23,7 +24,7 @@ def import_marathon_weapon():
 
         part_materials = mesh["PartMaterials"]
         for part, material in part_materials.items():
-            obj = bpy.data.objects.get(part)
+            obj = Helpers.GetCfgPart(part, lookup)
             if not obj:
                 continue
             # Maybe do for all Marathon imports? blend file size could become an issue maybe tho?
@@ -31,7 +32,7 @@ def import_marathon_weapon():
             Helpers.store_split_normals_attribute(obj)
 
         for part, material in part_materials.items():
-            obj = bpy.data.objects.get(part)
+            obj = Helpers.GetCfgPart(part, lookup)
             if not obj:
                 continue
 
@@ -89,7 +90,7 @@ def import_marathon_weapon():
             if armature:
                 break
 
-def assign_gear_shader():
+def assign_gear_shader(objects=None):
     if bpy.data.materials.get(f"D2GearShader") is None:
         addon_dir = os.path.dirname(__file__)
         full_path = os.path.join(addon_dir, "blends/D2GearShader.blend")
@@ -99,7 +100,7 @@ def assign_gear_shader():
         bpy.data.materials.get(f"D2ReticleShader").use_fake_user = True
         bpy.data.materials.get(f"D2GearShader").use_fake_user = True
 
-    for obj in Helpers.GetCfgParts():
+    for obj in (objects if objects is not None else Helpers.GetCfgParts()):
         if not os.path.exists(os.path.join(globals.AssetsPath, f'Materials/{obj.material_slots[0].name}.json')):
             Helpers.log(f"File {os.path.join(globals.AssetsPath, f'Materials/{obj.material_slots[0].name}.json')} doesnt exist!")
             continue
@@ -195,8 +196,9 @@ def fix_dupe_bones():
     if main_armature is None:
         return
     
+    old_armature_name = main_armature.name # fbx actions are named after it
     main_armature.name = globals.Cfg["MeshName"]
-    
+
     # Rename vertex weights if there are duplicates
     for obj in Helpers.GetCfgParts():
         if obj.type == 'MESH':
@@ -221,10 +223,13 @@ def fix_dupe_bones():
             if modifier.type == 'ARMATURE':
                 modifier.object = main_armature
 
-    
-    bpy.context.view_layer.objects.active = main_armature
+    rename_bones(main_armature, old_armature_name)
+
+def rename_bones(armature_obj, old_armature_name):
+    bpy.context.view_layer.objects.active = armature_obj
     bpy.ops.object.mode_set(mode='EDIT')
-    armature = main_armature.data
+    armature = armature_obj.data
+    renamed = {}
     for bone in armature.edit_bones:
         if "." in bone.name:
             part = bone.name.split(".")
@@ -232,13 +237,132 @@ def fix_dupe_bones():
                 Helpers.log(f'Deleted duplicate bone: {bone.name}')
                 armature.edit_bones.remove(bone)
         elif(checkHex(bone.name)):
+            old_name = bone.name
             if len(bone.name) == 7: # stupid stupid stupid stupid
-                bone.name = bone.name + "0" 
-            key = str(int.from_bytes(bytes.fromhex(bone.name), byteorder= "little" if globals.Game == globals.TigerGame.DESTINY else "big"))
-            if key in name_mappings:
-                bone.name = name_mappings[key]
+                bone.name = bone.name + "0"
+            bone.name = mapped_bone_name(bone.name) or bone.name
+            if bone.name != old_name:
+                renamed[old_name] = bone.name
 
     bpy.ops.object.mode_set(mode='OBJECT')
+    rename_action_bones(armature_obj, old_armature_name, renamed)
+
+def import_first_person_rig(self):
+    path = os.path.join(globals.AssetsPath, f'{globals.Cfg["MeshName"]}_FirstPerson.fbx')
+    if not os.path.isfile(path):
+        return
+
+    parent_collection = globals.ImportCollection or bpy.data.collections.get(str(globals.Name))
+    if parent_collection is None:
+        return
+
+    collection = bpy.data.collections.new(f"{globals.Name} First Person")
+    parent_collection.children.link(collection)
+    layer_collection = find_layer_collection(bpy.context.view_layer.layer_collection, collection)
+    previous_collection = bpy.context.view_layer.active_layer_collection
+    if layer_collection:
+        bpy.context.view_layer.active_layer_collection = layer_collection
+
+    objects_before = set(bpy.data.objects)
+    bpy.ops.object.select_all(action='DESELECT')
+    imported = Helpers.ImportFBX(self, path)
+    bpy.context.view_layer.active_layer_collection = previous_collection
+    if not imported:
+        return
+
+    new_objects = [obj for obj in bpy.data.objects if obj not in objects_before]
+    armature = next((obj for obj in new_objects if obj.type == 'ARMATURE'), None)
+    meshes = [obj for obj in new_objects if obj.type == 'MESH']
+
+    # same as the main parts
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in meshes:
+        obj.select_set(True)
+    if meshes:
+        bpy.context.view_layer.objects.active = meshes[0]
+        bpy.ops.object.transform_apply()
+    bpy.ops.object.select_all(action='DESELECT')
+
+    for obj in meshes:
+        for slt in obj.material_slots:
+            part = slt.name.rpartition('.')
+            if part[2].isnumeric() and part[0] in bpy.data.materials:
+                slt.material = bpy.data.materials.get(part[0])
+
+    # same shader as the main parts
+    if self.use_import_materials and meshes:
+        assign_gear_shader(meshes)
+
+    if armature is None:
+        return
+
+    old_armature_name = armature.name
+    armature.name = f'{globals.Cfg["MeshName"]} First Person'
+    rename_bones(armature, old_armature_name)
+    Helpers.log(f"Imported first person rig {armature.name}")
+
+def find_layer_collection(layer_collection, collection):
+    if layer_collection.collection == collection:
+        return layer_collection
+    for child in layer_collection.children:
+        found = find_layer_collection(child, collection)
+        if found:
+            return found
+    return None
+
+def rename_action_bones(armature_obj, old_armature_name, renamed):
+    if not renamed:
+        return
+
+    actions = [action for action in bpy.data.actions if action.name.startswith(f"{old_armature_name}|")]
+    if armature_obj.animation_data and armature_obj.animation_data.action and armature_obj.animation_data.action not in actions:
+        actions.append(armature_obj.animation_data.action)
+    if not actions: # fall back to any action using these bones
+        actions = list(bpy.data.actions)
+
+    prefix = 'pose.bones["'
+    for action in actions:
+        for fcurve in action_fcurves(action):
+            path = fcurve.data_path
+            if not path.startswith(prefix):
+                continue
+            name, _, rest = path[len(prefix):].partition('"]')
+            if name in renamed:
+                fcurve.data_path = f'{prefix}{renamed[name]}"]{rest}'
+
+        for group in action_groups(action):
+            if group.name in renamed:
+                group.name = renamed[group.name]
+
+def action_channelbags(action):
+    for layer in getattr(action, "layers", []):
+        for strip in layer.strips:
+            for channelbag in getattr(strip, "channelbags", []):
+                yield channelbag
+
+def action_fcurves(action):
+    channelbags = list(action_channelbags(action))
+    if channelbags:
+        for channelbag in channelbags:
+            yield from channelbag.fcurves
+    elif hasattr(action, "fcurves"):
+        yield from action.fcurves
+
+def action_groups(action):
+    channelbags = list(action_channelbags(action))
+    if channelbags:
+        for channelbag in channelbags:
+            yield from channelbag.groups
+    elif hasattr(action, "groups"):
+        yield from action.groups
+
+def mapped_bone_name(name):
+    if not name or not checkHex(name):
+        return None
+    if len(name) == 7:
+        name = name + "0"
+    key = str(int.from_bytes(bytes.fromhex(name), byteorder= "little" if globals.Game == globals.TigerGame.DESTINY else "big"))
+    return name_mappings.get(key)
 
 def checkHex(s):
     for ch in s:

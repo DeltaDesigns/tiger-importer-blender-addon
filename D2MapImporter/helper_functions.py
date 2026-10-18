@@ -5,6 +5,7 @@ import mathutils
 import json
 import gc
 import math
+import re
 
 from . import destiny_importer as globals
 from . import helper_functions as Helpers
@@ -59,21 +60,128 @@ def add_to_collection(name):
             # Link each object to the target collection
             coll_target.objects.link(ob)
 
+def StripNameSuffix(name):
+    return re.sub(r'\.\d{3,}$', '', name)
+
+def GetImportCollection():
+    globals.ImportCollection = None
+    name = str(globals.Name)
+    parent_name = globals.Cfg.get("Parent")
+    if parent_name is None:
+        collection = bpy.data.collections.get(name)
+        if collection is None:
+            collection = bpy.data.collections.new(name)
+            bpy.context.scene.collection.children.link(collection)
+        elif len(collection.objects) > 0:
+            return None
+    else:
+        parent = GetParentCollection(parent_name)
+        if any(StripNameSuffix(child.name) == name for child in parent.children):
+            return None
+        collection = bpy.data.collections.new(name)
+        parent.children.link(collection)
+
+    globals.ImportCollection = collection
+    return collection
+
+def GetParentCollection(name):
+    collection = bpy.data.collections.get(name)
+    if collection is None:
+        collection = bpy.data.collections.new(name)
+        bpy.context.scene.collection.children.link(collection)
+    return collection
+
+def FindLayerCollection(layer_collection, collection):
+    if layer_collection.collection == collection:
+        return layer_collection
+    for child in layer_collection.children:
+        found = FindLayerCollection(child, collection)
+        if found:
+            return found
+    return None
+
+def GetPartObjectLookup():
+    if Is_Map(globals.ExportType) or globals.ImportCollection is None:
+        return None
+    
+    lookup = {}
+    for obj in globals.ImportCollection.objects:
+        lookup.setdefault(StripNameSuffix(obj.name), obj)
+    return lookup
+
+def GetCfgPart(part, lookup=None):
+    if lookup is None:
+        return bpy.data.objects.get(part)
+    return lookup.get(part)
+
 def GetCfgParts():
     Parts = []
+    lookup = GetPartObjectLookup()
     for name, mesh in globals.Cfg["Parts"].items():
         # New format
         if "PartMaterials" in mesh:
             part_materials = mesh["PartMaterials"]
         else: # Old format
             part_materials = mesh
-            
+
         for part, material in part_materials.items():
-            obj = bpy.data.objects.get(part)
+            obj = GetCfgPart(part, lookup)
             if not obj:
                 continue
             Parts.append(obj)
     return Parts
+
+pending_attachments = []
+
+def queue_attachment():
+    bone_name = globals.Cfg.get("AttachmentBone")
+    bone_index = next((mesh["AttachmentBoneIndex"] for mesh in globals.Cfg["Parts"].values() if "AttachmentBoneIndex" in mesh), -1)
+    if bone_name is None and bone_index == -1:
+        return
+
+    child_collection = globals.ImportCollection
+    parent_collection = bpy.data.collections.get(globals.Cfg["Parent"])
+    if child_collection is None or parent_collection is None:
+        return
+    pending_attachments.append((child_collection, parent_collection, bone_name, bone_index))
+
+def apply_attachments():
+    for child_collection, parent_collection, bone_name, bone_index in pending_attachments:
+        child_name = child_collection.name
+        parent_name = parent_collection.name
+
+        # only the parent's own objects, its collection also holds the children (and their armatures)
+        armatures = [obj for obj in parent_collection.objects if obj.type == 'ARMATURE']
+        parent_armature = next((obj for obj in armatures if obj.name == parent_name), armatures[0] if armatures else None)
+        if parent_armature is None:
+            log(f"Could not attach {child_name}, {parent_name} has no armature (import its parent cfg as well)")
+            continue
+
+        bones = parent_armature.data.bones
+        bone = bones.get(bone_name) if bone_name else None
+        if bone is None and bone_name:
+            bone = bones.get(globals.mapped_bone_name(bone_name) or "")
+        if bone is None and 0 <= bone_index < len(bones):
+            bone = bones[bone_index]
+        if bone is None:
+            log(f"Could not attach {child_name}, bone {bone_name} ({bone_index}) not found on {parent_armature.name}")
+            continue
+
+        # inverse keeps the objects where they are now, they then follow the bone from there
+        bone_matrix = parent_armature.matrix_world @ bone.matrix_local
+        for obj in child_collection.all_objects:
+            if obj.parent is not None or obj.constraints.get("Attachment"): # children follow their parent (meshes on an armature)
+                continue
+
+            constraint = obj.constraints.new(type='CHILD_OF')
+            constraint.name = "Attachment"
+            constraint.target = parent_armature
+            constraint.subtarget = bone.name
+            constraint.inverse_matrix = bone_matrix.inverted()
+
+        log(f"Attached {child_name} to {parent_armature.name}:{bone.name}")
+
+    pending_attachments.clear()
 
 def GetTexture(image_name):
     image_extensions = ['.dds', '.tga', '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp']
@@ -131,6 +239,7 @@ def duplicate_armature_with_children(armature):
 def CombineMeshes():
     try:
         Helpers.log(f'Combing meshes for {globals.Cfg["MeshName"]}...')
+        lookup = GetPartObjectLookup()
         for name, mesh in globals.Cfg["Parts"].items():
             # New format
             if "PartMaterials" in mesh:
@@ -145,7 +254,7 @@ def CombineMeshes():
             objects_to_join = []
 
             for part, material in part_materials.items():
-                obj = bpy.data.objects.get(part)
+                obj = GetCfgPart(part, lookup)
                 if not obj:
                     continue
                 objects_to_join.append(obj)
