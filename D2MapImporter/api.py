@@ -100,6 +100,10 @@ def assign_gear_shader():
         bpy.data.materials.get(f"D2GearShader").use_fake_user = True
 
     for obj in Helpers.GetCfgParts():
+        if not os.path.exists(os.path.join(globals.AssetsPath, f'Materials/{obj.material_slots[0].name}.json')):
+            Helpers.log(f"File {os.path.join(globals.AssetsPath, f'Materials/{obj.material_slots[0].name}.json')} doesnt exist!")
+            continue
+
         # Assign gear shader          
         # Kinda dumb way to check but it works
         with open(os.path.join(globals.AssetsPath, f'Materials/{obj.material_slots[0].name}.json'), 'r') as f:

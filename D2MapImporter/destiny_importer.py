@@ -7,7 +7,6 @@ import requests
 import json
 import time
 
-from . import helper_functions as Helpers
 from .helper_functions import *
 from .materials import *
 from .lights import *
@@ -85,6 +84,12 @@ class ImportDestinyCfg(Operator, ImportHelper):
             description="Imports lights.\nSome light colors and intensities can/will be wrong",
             default=True,
             )
+
+    import_animations: BoolProperty(
+            name="Import Animations",
+            description="Imports Animations.\nRequires animations to have been exported with the Entity in Charm.",
+            default=False,
+            )
     
     light_intensity_override: FloatProperty(
         name="Light Intensity",
@@ -138,6 +143,7 @@ class ImportDestinyCfg(Operator, ImportHelper):
         box.prop(self, 'rename_bones')
         box.prop(self, 'merge_meshes')
         box.prop(self, 'use_import_materials')
+        box.prop(self, 'import_animations')
         box.prop(self, 'import_lights')
         box.prop(self, 'light_intensity_override')
         box.prop(self, 'override_light_color')
@@ -304,7 +310,7 @@ def DoImport(self):
             import_marathon_weapon()
         else:
             # Apply transforms if API type
-            if "API" in Type or "D1API" in Type:
+            if Is_Gear(Type) or Is_Anim(Type):
                 for obj in GetCfgParts():
                     obj.select_set(True)
                     bpy.ops.object.transform_apply()
@@ -332,10 +338,10 @@ def DoImport(self):
     # Assign materials if enabled
     if self.use_import_materials:
         assign_materials()
-        if "API" in Type or "D1API" in Type:
+        if Is_Gear:
             assign_gear_shader()
 
-    if self.rename_bones or "API" in Type or "D1API" in Type:
+    if self.rename_bones or Is_Gear(Type) or Is_Anim(Type):
         fix_dupe_bones()
 
     # Add terrain dyemaps if applicable

@@ -13,7 +13,7 @@ def ImportFBX(self, modelPath):
     if os.path.isfile(modelPath):
         Helpers.log(f'Importing FBX {modelPath}')
         bpy.ops.import_scene.fbx(filepath=modelPath,
-                                use_anim=False,
+                                use_anim=self.import_animations,
                                 use_custom_normals= not any(x in globals.Type for x in ['Decorators', 'SpeedTrees']), 
                                 ignore_leaf_bones=False, 
                                 automatic_bone_orientation=True,
@@ -36,6 +36,12 @@ def ShowMessageBox(message = "", title = "Message Box", icon = 'INFO'):
 
 def Is_Map(ExportType):
     return "Map" in ExportType
+
+def Is_Gear(ExportType):
+    return "API" in ExportType or "D1API" in ExportType
+
+def Is_Anim(ExportType):
+    return "Emote" in ExportType
 
 def add_to_collection(name):
     # List of object references
