@@ -5,7 +5,7 @@ import sys
 bl_info = {
     "name": "Tiger Importer",
     "author": "DeltaDesigns, Montague/Monteven",
-    "version": (1, 5, 4),
+    "version": (1, 6, 0),
     "blender": (4, 0, 0),
     "location": "File > Import",
     "description": "Import Destiny/Marathon rips from Charm/MIDA",
