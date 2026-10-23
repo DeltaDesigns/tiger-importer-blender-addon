@@ -1,3 +1,5 @@
 
 *.pyc
 *.zip
+unlink_addon.bat
+link_addon.bat

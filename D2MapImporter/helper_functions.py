@@ -183,19 +183,49 @@ def apply_attachments():
 
     pending_attachments.clear()
 
-def GetTexture(image_name):
-    image_extensions = ['.dds', '.tga', '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp']
-    textures_dir = glob.escape(os.path.join(globals.AssetsPath, "Textures"))
-    for extension in image_extensions:
-        pattern = os.path.join(textures_dir, f"{image_name}{extension}")
-        files = glob.glob(pattern)
-        if files:
-            filename = os.path.basename(files[0])
-            if bpy.data.images.get(filename) is None:
-                bpy.data.images.load(files[0], check_existing=True)
+image_extensions = ['.dds', '.tga', '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp']
+texture_dir_cache = {} # textures dir -> {lowercase name: filename}, cleared on every import
 
-            return filename
-    return None
+def GetTextureLookup(textures_dir):
+    lookup = texture_dir_cache.get(textures_dir)
+    if lookup is not None:
+        return lookup
+
+    # scan the folder once instead of globbing every extension per texture
+    lookup = {}
+    priority = {}
+    if os.path.isdir(textures_dir):
+        for entry in os.scandir(textures_dir):
+            stem, ext = os.path.splitext(entry.name)
+            ext = ext.lower()
+            if ext not in image_extensions:
+                continue
+            key = stem.lower()
+            rank = image_extensions.index(ext)
+            if key not in lookup or rank < priority[key]:
+                lookup[key] = entry.name
+                priority[key] = rank
+    texture_dir_cache[textures_dir] = lookup
+    return lookup
+
+def GetTexture(image_name):
+    textures_dir = os.path.join(globals.AssetsPath, "Textures")
+    filename = GetTextureLookup(textures_dir).get(image_name.lower())
+    if filename is None:
+        return None
+
+    if bpy.data.images.get(filename) is None:
+        bpy.data.images.load(os.path.join(textures_dir, filename), check_existing=True)
+    return filename
+
+def dedupe_material_slots(objects):
+    # Point slots using a duplicate "name.001" material back to the original
+    materials = bpy.data.materials
+    for obj in objects:
+        for slt in obj.material_slots:
+            part = slt.name.rpartition('.')
+            if part[2].isnumeric() and part[0] in materials:
+                slt.material = materials.get(part[0])
 
 def cleanup():
     Helpers.log(f"Cleaning up...")
@@ -283,10 +313,16 @@ def CombineMeshes():
     except Exception as error:
         Helpers.log(f'CombineMeshes: {globals.Cfg["MeshName"]}: {error}')
 
+loaded_cfgs = {} # path -> cfg, both import passes read every cfg, cleared on every import
+
 def load_cfg(file_path):
     """Load and return the configuration from a file."""
-    with open(file_path, 'r') as f:
-        return json.load(f)
+    cfg = loaded_cfgs.get(file_path)
+    if cfg is None:
+        with open(file_path, 'r') as f:
+            cfg = json.load(f)
+        loaded_cfgs[file_path] = cfg
+    return cfg
 
 def prepare_and_process_map(self, sorted_files):
     """Prepare and process files for map import."""
@@ -301,30 +337,36 @@ def prepare_and_process_map(self, sorted_files):
         Helpers.log(f"Size: {size} bytes")
 
         # Load configuration
-        globals.Cfg = load_cfg(os.path.join(globals.FilePath, file.name))
-        if "ExportType" not in globals.Cfg:
+        cfg = load_cfg(os.path.join(globals.FilePath, file.name))
+        if "ExportType" not in cfg:
             raise ImportError("You are trying to import an old cfg file. Only exports from Charm v2.5.0 or higher are supported on this version!")
-        
-        if "Game" in globals.Cfg:
-            globals.Game = globals.TigerGame(globals.Cfg["Game"])
-            Helpers.log(f"Game: {globals.Game}")
-        else:
-            Helpers.log("'Game' property not found in cfg file. Update your Charm or MIDA!")
-            
-        globals.Name = globals.Cfg["MeshName"]
-        globals.Type = globals.Cfg["Type"]
-        globals.ExportType = globals.Cfg["ExportType"]
-        globals.AssetPath = globals.Cfg["AssetsPath"]
 
-        if ("UnifiedAssets" in globals.Cfg) and (globals.Cfg["UnifiedAssets"] == True) and (globals.ExportType == "Map"):
-            globals.AssetsPath = globals.Cfg["AssetsPath"]
-        else:
-            globals.AssetsPath = globals.FilePath
-
-        Helpers.log(f"AssetsPath: {globals.AssetsPath}")
+        set_cfg_globals(cfg, log_info=True)
 
         # Prepare map import first
         globals.PrepareMapImport(self, file)
+
+def set_cfg_globals(cfg, log_info=False):
+    """Point the importer globals at this cfg, both import passes need the same Game and AssetsPath."""
+    globals.Cfg = cfg
+    if "Game" in cfg:
+        globals.Game = globals.TigerGame(cfg["Game"])
+        if log_info:
+            Helpers.log(f"Game: {globals.Game}")
+    elif log_info:
+        Helpers.log("'Game' property not found in cfg file. Update your Charm or MIDA!")
+
+    globals.Name = cfg["MeshName"]
+    globals.Type = cfg["Type"]
+    globals.ExportType = cfg["ExportType"]
+
+    if cfg.get("UnifiedAssets") == True and globals.ExportType == "Map":
+        globals.AssetsPath = cfg["AssetsPath"]
+    else:
+        globals.AssetsPath = globals.FilePath
+
+    if log_info:
+        Helpers.log(f"AssetsPath: {globals.AssetsPath}")
 
 def process_instancing(self, sorted_files):
     """Process the instancing logic after importing models."""
@@ -333,12 +375,7 @@ def process_instancing(self, sorted_files):
         if file.name == "":
             continue
 
-        globals.Cfg = load_cfg(os.path.join(globals.FilePath, file.name))
-        
-        globals.Name = globals.Cfg["MeshName"]
-        globals.Type = globals.Cfg["Type"]
-        globals.ExportType = globals.Cfg["ExportType"]
-        globals.AssetPath = globals.Cfg["AssetsPath"]
+        set_cfg_globals(load_cfg(os.path.join(globals.FilePath, file.name)))
 
         # Handle instancing for the map or model
         globals.DoImport(self)
@@ -354,10 +391,12 @@ def instance_mesh(self, mesh, instances):
     else: # Old format
         part_materials = mesh_entry
 
+    temp_objects = bpy.data.collections.get("Import_Temp").objects
     for part, material in part_materials.items():
-        obj = bpy.data.collections.get("Import_Temp").objects.get(part)
-        if obj is None or entity_copied:
+        source = temp_objects.get(part)
+        if source is None or entity_copied:
             continue
+        obj = source
 
         # Handle specific type visibility settings
         if any(x in globals.Type for x in ['Decorators', 'SkyObjects', 'WaterDecals', 'RoadDecals']):
@@ -371,20 +410,18 @@ def instance_mesh(self, mesh, instances):
             Helpers.log(f"Using Geometry Node instancing for {mesh}")
             create_geometry_nodes_instancer(obj, instances)
         else:
+            # Handle armature duplication for skeleton-based meshes
+            armature = source.find_armature()
+            target_collection = bpy.context.collection
             for i, instance in enumerate(instances):
                 #Helpers.log(f'{part}: {i}/{len(instances)}')
-
-                # Handle armature duplication for skeleton-based meshes
-                armature = bpy.data.objects[part].find_armature()
-                if armature:
-                    obj = armature 
 
                 if armature:
                     obj = duplicate_armature_with_children(armature)
                     entity_copied = True
                 else:
-                    obj = obj.copy()
-                    bpy.context.collection.objects.link(obj)
+                    obj = source.copy()
+                    target_collection.objects.link(obj)
 
                 # Set instance transforms
                 location = instance["Translation"]
@@ -406,11 +443,11 @@ def create_geometry_nodes_instancer(source_obj, instances):
     source_obj.rotation_euler = quat
 
     name = source_obj.name
-    positions = [inst["Translation"] for inst in instances]
     mesh = bpy.data.meshes.new(name + "_Points")
-    mesh.from_pydata(positions, [], [])
+    mesh.vertices.add(len(instances))
+    mesh.vertices.foreach_set("co", [c for inst in instances for c in inst["Translation"]])
     mesh.update()
-  
+
     rot_attr = mesh.attributes.new(
         name="instance_rotation",
         type='FLOAT_VECTOR',
@@ -423,11 +460,12 @@ def create_geometry_nodes_instancer(source_obj, instances):
         domain='POINT'
     )
 
-    for i, inst in enumerate(instances):
+    rotations = []
+    for inst in instances:
         quat = mathutils.Quaternion([inst["Rotation"][3], inst["Rotation"][0], inst["Rotation"][1], inst["Rotation"][2]])
-        euler = quat.to_euler("XYZ")
-        rot_attr.data[i].vector = euler
-        scale_attr.data[i].vector = inst["Scale"]
+        rotations.extend(quat.to_euler("XYZ"))
+    rot_attr.data.foreach_set("vector", rotations)
+    scale_attr.data.foreach_set("vector", [c for inst in instances for c in inst["Scale"]])
 
     points_obj = bpy.data.objects.new(name + "_PointsObj", mesh)
     points_obj.data.materials.append(source_obj.data.materials[0])
@@ -536,9 +574,13 @@ def store_split_normals_attribute(
             domain='CORNER'
         )
 
-    for i, loop in enumerate(mesh.loops):
-        attr.data[i].vector = loop.normal
-        flag_attr.data[i].vector = (1,1,1)
+    normals = [0.0] * (len(mesh.loops) * 3)
+    if hasattr(mesh, "corner_normals"): # 4.1+
+        mesh.corner_normals.foreach_get("vector", normals)
+    else:
+        mesh.loops.foreach_get("normal", normals)
+    attr.data.foreach_set("vector", normals)
+    flag_attr.data.foreach_set("vector", [1.0] * len(normals))
 
 def store_vertex_positions_attribute(
     object=None,
@@ -571,9 +613,10 @@ def store_vertex_positions_attribute(
             domain='POINT'
         )
 
-    for i, vert in enumerate(mesh.vertices):
-        attr.data[i].vector = vert.co
-        flag_attr.data[i].vector = (1,1,1)
+    positions = [0.0] * (len(mesh.vertices) * 3)
+    mesh.vertices.foreach_get("co", positions)
+    attr.data.foreach_set("vector", positions)
+    flag_attr.data.foreach_set("vector", [1.0] * len(positions))
 
 def log(string):
     print(f"[Tiger Importer]: {string}")

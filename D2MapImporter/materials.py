@@ -5,18 +5,15 @@ import json
 from .helper_functions import *
 from . import destiny_importer as globals
 
+processed_materials = set() # material hashes already set up this import, cleared on every import
+
 def assign_materials():
     Helpers.log("Assigning materials...")
     global image_extension
-    materials = bpy.data.materials
-   
-    for obj in bpy.data.objects: # Remove any duplicate materials that may have been created
-        if obj.type == 'MESH':
-            for slt in obj.material_slots:
-                part = slt.name.rpartition('.')
-                if part[2].isnumeric() and part[0] in materials:
-                    slt.material = materials.get(part[0])
-    
+
+    # Remove any duplicate materials that may have been created, only this cfg's parts (instances share their mesh data)
+    dedupe_material_slots([obj for obj in GetCfgParts() if obj.type == 'MESH'])
+
     #json_files = [f for f in os.listdir(f'{globals.FilePath}/Materials') if f.endswith(".json")]
 
     for name, mesh in globals.Cfg["Parts"].items():
@@ -141,7 +138,7 @@ def add_terrain_dyemaps(self):
                                 material_copy.node_tree.links.new(terrain_node.inputs[f'Dyemap {input_index} A'], texnode.outputs[1])
                                 if self.use_terrain_dyemap_output:
                                     material_copy.node_tree.links.new(terrain_node.outputs[0], material_copy.node_tree.nodes.get("Material Output").inputs[0])
-                            except:
+                            except (KeyError, IndexError): # socket names past the node group's inputs
                                 Helpers.log(f'{material_copy.name}: Index {input_index} out of range for terrain node group')
 
                             tex_num += 1
@@ -153,6 +150,10 @@ def add_terrain_dyemaps(self):
                     # terrain_node.parent = frame_node
 
 def create_material(name):
+    if name in processed_materials:
+        return
+    processed_materials.add(name)
+
     if not os.path.exists(os.path.join(globals.AssetsPath, f'Materials/{name}.json')):
         Helpers.log(f"Could not find material {name}.Json in '{globals.AssetsPath}/Materials', skipping...")
         return
@@ -164,10 +165,11 @@ def create_material(name):
     #vs_textures = data["Material"]["Vertex"]["Textures"]
     
     try:
-        material = bpy.data.materials.new(name=data["Hash"])
+        # reuse the fbx's material, new() would only make an unused "Hash.001"
+        material = bpy.data.materials.get(data["Hash"])
+        if material is None:
+            material = bpy.data.materials.new(name=data["Hash"])
         material.use_nodes = True
-
-        material = bpy.data.materials[data["Hash"]]
 
         # Get Rasterizer settings
         rasterizer = data["RenderStates"].get("Rasterizer")
@@ -208,6 +210,6 @@ def create_material(name):
 
                 tex_num += 1
     except KeyError as keyE:
-        Helpers.log(f"create_material: {keyE}: ", data["Hash"])
+        Helpers.log(f"create_material: {keyE}: {data.get('Hash', name)}")
     except Exception as e:
         Helpers.log(f"create_material: {e}")
