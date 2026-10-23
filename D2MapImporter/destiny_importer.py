@@ -124,7 +124,13 @@ class ImportDestinyCfg(Operator, ImportHelper):
             description="Uses Geometry Nodes for mesh instances (Statics and Decorators)",
             default=False,
             )
-    
+
+    use_collection_instancing: BoolProperty(
+            name="Use Collection Instancing",
+            description="Places map meshes as collection instances using empties.\nMay be slighty faster to import and lighter in the viewport, use Make Instances Real to edit a single object.",
+            default=False,
+            )
+
     debug_logs: BoolProperty(
             name="Debug Logs",
             description="Print debug logs to the console",
@@ -150,6 +156,7 @@ class ImportDestinyCfg(Operator, ImportHelper):
         box.prop(self, 'light_intensity_override')
         box.prop(self, 'override_light_color')
         box.prop(self, 'use_geo_node_instancing')
+        box.prop(self, 'use_collection_instancing')
 
         box2 = layout.box()
         box2.label(text="Misc:")
@@ -171,6 +178,8 @@ class ImportDestinyCfg(Operator, ImportHelper):
         texture_dir_cache.clear()
         processed_materials.clear()
         loaded_cfgs.clear()
+        instance_source_collections.clear()
+        mesh_uses_left.clear()
 
         start_time = time.time()
         # Deselect all objects just in case
@@ -245,7 +254,10 @@ def PrepareMapImport(self, file):
                 Helpers.log(f'Mesh not in Cfg parts, this shouldnt happen!')
                 continue
 
-            Helpers.log(f'{i}/{total}')
+            # counted for every cfg, DoImport counts it back down while instancing
+            mesh_uses_left[mesh] = mesh_uses_left.get(mesh, 0) + 1
+
+            Helpers.log_debug(f'{i}/{total}')
             i+=1
             if mesh in hash_import_list:
                 Helpers.log_debug(f'Mesh {mesh} already in hash_import_list (scene), skipping')
@@ -291,7 +303,7 @@ def DoImport(self):
                 continue
 
             # Instance the meshes with the necessary transformations
-            Helpers.log(f'Instancing {mesh}')
+            Helpers.log_debug(f'Instancing {mesh}')
             instance_mesh(self, mesh, instances)
 
     else:

@@ -12,7 +12,7 @@ from . import helper_functions as Helpers
 
 def ImportFBX(self, modelPath):
     if os.path.isfile(modelPath):
-        Helpers.log(f'Importing FBX {modelPath}')
+        Helpers.log_debug(f'Importing FBX {modelPath}')
         bpy.ops.import_scene.fbx(filepath=modelPath,
                                 use_anim=self.import_animations,
                                 use_custom_normals= not any(x in globals.Type for x in ['Decorators', 'SpeedTrees']), 
@@ -239,32 +239,91 @@ def cleanup():
     bpy.ops.outliner.orphans_purge(do_recursive = True)
     Helpers.log("Done cleaning up!")
 
-def duplicate_armature_with_children(armature):
+def duplicate_armature_with_children(armature, collection):
     new_armature = armature.copy()
-    # Loop through the children of the parent object
+    collection.objects.link(new_armature)
     for child in armature.children:
-        # Create a copy of the child object
+        # copies aren't in any collection yet, so linking once is enough
         new_child = child.copy()
-        # Add the copy to the scene
-        bpy.context.scene.collection.objects.link(new_child)
-        # Parent the new child to the new parent
+        collection.objects.link(new_child)
         new_child.parent = new_armature
-        # Loop through the child's modifiers
         for modifier in new_child.modifiers:
-            # Check if the modifier is an armature modifier
             if modifier.type == 'ARMATURE':
-                # Set the armature object in the modifier to the new armature
                 modifier.object = new_armature
 
-        for collection in new_child.users_collection: #...
-            # Unlink the armature from the collection
-            collection.objects.unlink(new_child)
-            
-        bpy.context.view_layer.active_layer_collection.collection.objects.link(new_child) #add the child to the collection (again, idk why this is needed)
-    # Move the new armature to the new collection
-    bpy.context.view_layer.active_layer_collection.collection.objects.link(new_armature)
-
     return new_armature
+
+def move_from_temp(obj, collection, temp_collection):
+    """Use an Import_Temp source object as an instance itself instead of copying it one last time."""
+    collection.objects.link(obj)
+    if obj.name in temp_collection.objects:
+        temp_collection.objects.unlink(obj)
+
+def set_instance_transform(obj, instance):
+    quat = mathutils.Quaternion([instance["Rotation"][3], instance["Rotation"][0], instance["Rotation"][1], instance["Rotation"][2]])
+    if globals.Type == "Terrain":
+        quat = mathutils.Quaternion([1,0,0,0])
+
+    obj.location = instance["Translation"]
+    obj.rotation_mode = 'QUATERNION'
+    obj.rotation_quaternion = quat
+    obj.scale = instance["Scale"]
+
+# Map meshes used by more than one placement can be instanced as a collection, one empty per placement
+# instead of a copy of every part. The source collections live in an excluded "Instance Sources" collection.
+instance_source_collections = {} # mesh -> its source collection, cleared on every import
+# How many map cfgs still need a mesh's Import_Temp sources, the last one can take the sources instead of copying them
+mesh_uses_left = {}
+
+def GetInstanceSourcesRoot():
+    root = bpy.data.collections.get("Instance Sources")
+    if root is None:
+        root = bpy.data.collections.new("Instance Sources")
+        bpy.context.scene.collection.children.link(root)
+        layer_collection = FindLayerCollection(bpy.context.view_layer.layer_collection, root)
+        if layer_collection:
+            layer_collection.exclude = True # sources sit at the origin, only the instances should show
+    return root
+
+def GetInstanceSourceCollection(mesh, sources):
+    collection = instance_source_collections.get(mesh)
+    if collection is not None:
+        return collection
+
+    collection = bpy.data.collections.new(mesh)
+    GetInstanceSourcesRoot().children.link(collection)
+
+    added = set()
+    for source in sources:
+        armature = source.find_armature()
+        hierarchy = [armature] + list(armature.children) if armature else [source]
+        for obj in hierarchy:
+            if obj in added:
+                continue
+            added.add(obj)
+            # stays in Import_Temp too until that's removed, other cfgs may still look the sources up there
+            collection.objects.link(obj)
+            # the empty gets the placement, so a root object sits at the collection origin
+            if obj.parent is None:
+                obj.location = (0, 0, 0)
+                obj.rotation_mode = 'QUATERNION'
+                obj.rotation_quaternion = (1, 0, 0, 0)
+                obj.scale = (1, 1, 1)
+
+    instance_source_collections[mesh] = collection
+    return collection
+
+def instance_as_collection(mesh, sources, instances, no_shadows):
+    source_collection = GetInstanceSourceCollection(mesh, sources)
+    target_collection = bpy.context.collection
+    for instance in instances:
+        empty = bpy.data.objects.new(mesh, None)
+        empty.instance_type = 'COLLECTION'
+        empty.instance_collection = source_collection
+        if no_shadows:
+            empty.visible_shadow = False
+        target_collection.objects.link(empty)
+        set_instance_transform(empty, instance)
 
 def CombineMeshes():
     try:
@@ -382,8 +441,6 @@ def process_instancing(self, sorted_files):
 
 def instance_mesh(self, mesh, instances):
     """Handles the instancing and transformation of meshes."""
-    entity_copied = False
-
     mesh_entry = globals.Cfg["Parts"][mesh]
     # New format
     if "PartMaterials" in mesh_entry:
@@ -391,49 +448,59 @@ def instance_mesh(self, mesh, instances):
     else: # Old format
         part_materials = mesh_entry
 
-    temp_objects = bpy.data.collections.get("Import_Temp").objects
-    for part, material in part_materials.items():
-        source = temp_objects.get(part)
-        if source is None or entity_copied:
-            continue
-        obj = source
+    temp_collection = bpy.data.collections.get("Import_Temp")
+    sources = [obj for obj in (temp_collection.objects.get(part) for part in part_materials) if obj is not None]
 
-        # Handle specific type visibility settings
-        if any(x in globals.Type for x in ['Decorators', 'SkyObjects', 'WaterDecals', 'RoadDecals']):
-            obj.visible_shadow = False
+    # this is the last map cfg using these sources, the last placement can take them instead of a copy
+    mesh_uses_left[mesh] = mesh_uses_left.get(mesh, 0) - 1
+    reuse_sources = mesh_uses_left[mesh] <= 0 and mesh not in instance_source_collections
 
-        if(len(instances) > 10000):
-            Helpers.log(f"{mesh} has {len(instances)} instances!!")
+    no_shadows = any(x in globals.Type for x in ['Decorators', 'SkyObjects', 'WaterDecals', 'RoadDecals'])
+    if(len(instances) > 10000):
+        Helpers.log(f"{mesh} has {len(instances)} instances!!")
 
-        # Creates instances
-        if self.use_geo_node_instancing and any(x in globals.Type for x in ['Decorators', 'Statics']):
-            Helpers.log(f"Using Geometry Node instancing for {mesh}")
-            create_geometry_nodes_instancer(obj, instances)
-        else:
-            # Handle armature duplication for skeleton-based meshes
-            armature = source.find_armature()
-            target_collection = bpy.context.collection
-            for i, instance in enumerate(instances):
-                #Helpers.log(f'{part}: {i}/{len(instances)}')
+    if self.use_geo_node_instancing and any(x in globals.Type for x in ['Decorators', 'Statics']):
+        Helpers.log_debug(f"Using Geometry Node instancing for {mesh}")
+        for source in sources:
+            if no_shadows:
+                source.visible_shadow = False
+            create_geometry_nodes_instancer(source, instances)
+        return
 
-                if armature:
-                    obj = duplicate_armature_with_children(armature)
-                    entity_copied = True
+    if self.use_collection_instancing and len(instances) > 1 and globals.Type != "Terrain":
+        for source in sources:
+            if no_shadows:
+                source.visible_shadow = False
+        instance_as_collection(mesh, sources, instances, no_shadows)
+        return
+
+    target_collection = bpy.context.collection
+    last = len(instances) - 1
+    for source in sources:
+        if no_shadows:
+            source.visible_shadow = False
+
+        # Handle armature duplication for skeleton-based meshes, the copy brings all of its parts along
+        armature = source.find_armature()
+        for i, instance in enumerate(instances):
+            if armature:
+                if i == last and reuse_sources:
+                    obj = armature
+                    for o in [armature] + list(armature.children):
+                        move_from_temp(o, target_collection, temp_collection)
                 else:
-                    obj = source.copy()
-                    target_collection.objects.link(obj)
+                    obj = duplicate_armature_with_children(armature, target_collection)
+            elif i == last and reuse_sources:
+                obj = source
+                move_from_temp(source, target_collection, temp_collection)
+            else:
+                obj = source.copy()
+                target_collection.objects.link(obj)
 
-                # Set instance transforms
-                location = instance["Translation"]
-                scale = instance["Scale"]
-                quat = mathutils.Quaternion([instance["Rotation"][3], instance["Rotation"][0], instance["Rotation"][1], instance["Rotation"][2]])
-                if globals.Type == "Terrain":
-                    quat = mathutils.Quaternion([1,0,0,0])
+            set_instance_transform(obj, instance)
 
-                obj.location = location
-                obj.rotation_mode = 'QUATERNION'
-                obj.rotation_quaternion = quat
-                obj.scale = scale
+        if armature:
+            break
 
 def create_geometry_nodes_instancer(source_obj, instances):
     # Need to reset original obj transforms first
