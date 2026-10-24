@@ -13,6 +13,7 @@ from .materials import *
 from .lights import *
 from .api import *
 from .decals import *
+from .bytecode import raw_bytecode_materials, time_cb0_groups, failed_bytecode_materials, add_time_modifiers
 
 # ImportHelper is a helper class, defines filename and
 # invoke() function which calls the file selector.
@@ -35,6 +36,8 @@ Type = "Statics"
 ExportType = "Map" # Default
 Game = TigerGame.DESTINY
 ImportCollection = None # collection of the current non-map import
+print_debug_logs = False 
+ImportMaterialCBuffers = False
 
 # Yes I shamelessly let chaptgpt help me redo a lot of this
 # Fuck blender python, its awful in my very personal opinion
@@ -79,6 +82,12 @@ class ImportDestinyCfg(Operator, ImportHelper):
             name="Import Textures",
             description="Imports textures and tries to apply them to the models.\nTextures folder must be in the same place as the .cfg you are importing",
             default=True,
+            )
+
+    import_material_cbuffers: BoolProperty(
+            name="Import Material CBuffers",
+            description="Import material CBuffers along with tfx expressions.",
+            default=False,
             )
     
     import_lights: BoolProperty(
@@ -151,6 +160,9 @@ class ImportDestinyCfg(Operator, ImportHelper):
         box.prop(self, 'rename_bones')
         box.prop(self, 'merge_meshes')
         box.prop(self, 'use_import_materials')
+        row = box.row()
+        row.enabled = self.use_import_materials
+        row.prop(self, 'import_material_cbuffers')
         box.prop(self, 'import_animations')
         box.prop(self, 'import_lights')
         box.prop(self, 'light_intensity_override')
@@ -165,7 +177,7 @@ class ImportDestinyCfg(Operator, ImportHelper):
         box2.prop(self, 'debug_logs')
         
     def execute(self, context):
-        global Cfg, Game, Name, Type, ExportType, FilePath, AssetsPath, ImportCollection, print_debug_logs
+        global Cfg, Game, Name, Type, ExportType, FilePath, AssetsPath, ImportCollection, print_debug_logs, ImportMaterialCBuffers
         Cfg = None
         ImportCollection = None
         FilePath = None
@@ -174,12 +186,16 @@ class ImportDestinyCfg(Operator, ImportHelper):
         Type = "Statics"
         ExportType = "Map"
         print_debug_logs = self.debug_logs
+        ImportMaterialCBuffers = self.use_import_materials and self.import_material_cbuffers
         pending_attachments.clear()
         texture_dir_cache.clear()
         processed_materials.clear()
         loaded_cfgs.clear()
         instance_source_collections.clear()
         mesh_uses_left.clear()
+        raw_bytecode_materials.clear()
+        time_cb0_groups.clear()
+        failed_bytecode_materials.clear()
 
         start_time = time.time()
         # Deselect all objects just in case
@@ -215,6 +231,8 @@ class ImportDestinyCfg(Operator, ImportHelper):
                 #     bpy.data.objects.remove(obj, do_unlink=True)
                 bpy.data.collections.remove(collection, do_unlink=True)
 
+            add_time_modifiers()
+
             # The final cleanup, purging orphans walks all of bpy.data so it only runs once here
             cleanup()
 
@@ -224,7 +242,11 @@ class ImportDestinyCfg(Operator, ImportHelper):
         minutes = int(elapsed_seconds // 60)
         seconds = int(elapsed_seconds % 60)
         Helpers.log(f"Import finished in {minutes} minutes and {seconds} seconds")
-        return {'FINISHED'} # Lets Blender know the operator finished successfully.
+        if raw_bytecode_materials:
+            Helpers.log(f"{len(raw_bytecode_materials)} materials have raw bytecode from an older version of Charm, using 0 for bytecode assigned slots instead.")
+        if failed_bytecode_materials:
+            Helpers.log(f"{len(failed_bytecode_materials)} materials have bytecode outputs that couldn't be built, using 0 instead.")
+        return {'FINISHED'}
 
 # Import everything model needed first for performance reasons, if importing a map
 hash_import_list = set()

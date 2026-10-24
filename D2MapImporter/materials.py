@@ -4,6 +4,7 @@ import json
 
 from .helper_functions import *
 from . import destiny_importer as globals
+from .bytecode import add_cbuffer_node
 
 processed_materials = set() # material hashes already set up this import, cleared on every import
 
@@ -209,6 +210,9 @@ def create_material(name):
                     link_diffuse(material)
 
                 tex_num += 1
+
+        if globals.ImportMaterialCBuffers:
+            add_cbuffer_node(material, data)
     except KeyError as keyE:
         Helpers.log(f"create_material: {keyE}: {data.get('Hash', name)}")
     except Exception as e:
