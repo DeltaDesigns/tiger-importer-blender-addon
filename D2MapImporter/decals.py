@@ -9,7 +9,7 @@ from .materials import *
 
 def add_decal_planes(self):
     Helpers.log("Creating Decal planes...")
-    if not os.path.exists( globals.AssetsPath + f"/Rendering/Decals.json"):
+    if not os.path.exists(globals.FilePath + f"/Rendering/Decals.json"): # Rendering is written next to the cfgs, same as Lights.json
         Helpers.log(f"Could not find Decals.Json in '{globals.FilePath}/Rendering', skipping...")
         return
     
@@ -24,30 +24,35 @@ def add_decal_planes(self):
     with open(globals.FilePath + f"/Rendering/Decals.json", 'r') as f:
         Cfg = json.load(f)
 
+    collection = bpy.context.collection
     for name, data in Cfg.items():
         if bpy.data.materials.get(name) is None:
             create_material(name)
 
-        plane = bpy.ops.mesh.primitive_plane_add(size=1, location=(0, 0, 0))
-        plane = bpy.context.view_layer.objects.active
-        plane.name = name
-        if plane.data.materials:
-            plane.data.materials[0] = bpy.data.materials[name]
-        else:
-            plane.data.materials.append(bpy.data.materials[name])
-        
-        for i, instance in enumerate(data["Instances"]):
+        # one plane mesh per decal shared by all its instances, same as a size 1 primitive plane
+        mesh = create_plane_mesh(name)
+        material = bpy.data.materials.get(name)
+        if material:
+            mesh.materials.append(material)
+
+        for instance in data["Instances"]:
             location = [instance["Translation"][0], instance["Translation"][1], instance["Translation"][2]]
             quat = mathutils.Quaternion([instance["Rotation"][3], instance["Rotation"][0], instance["Rotation"][1], instance["Rotation"][2]]) #WXYZ
             scale = [instance["Scale"][0], instance["Scale"][1], instance["Scale"][2]]
 
+            plane = bpy.data.objects.new(name, mesh)
+            collection.objects.link(plane)
             plane.location = location
             plane.rotation_mode = 'QUATERNION'
             plane.rotation_quaternion = quat
             plane.scale = scale
 
-            if i != len(data["Instances"]) - 1:
-                plane = plane.copy()
-                bpy.context.collection.objects.link(plane)
-
     Helpers.log("Imported Decal Planes.")
+
+def create_plane_mesh(name):
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata([(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)], [], [(0, 1, 2, 3)])
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    uv_layer.data.foreach_set("uv", [0, 0, 1, 0, 1, 1, 0, 1])
+    mesh.update()
+    return mesh

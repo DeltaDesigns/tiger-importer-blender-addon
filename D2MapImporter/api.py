@@ -90,6 +90,15 @@ def import_marathon_weapon():
             if armature:
                 break
 
+# Shader Preset outputs that feed the same named inputs on the gear shader
+gear_preset_sockets = [
+    'Dye Color A', 'Dye Color B',
+    'Wear Remap_A', 'Wear Remap_B',
+    'Roughness Remap_A', 'Roughness Remap_B', 'Roughness Remap_C',
+    'Detail Diffuse', 'Detail Normal', 'Detail Blends', 'Worn Detail Blends',
+    'Iridescence, Fuzz, Transmission', 'Emission',
+]
+
 def assign_gear_shader(objects=None):
     if bpy.data.materials.get(f"D2GearShader") is None:
         addon_dir = os.path.dirname(__file__)
@@ -100,15 +109,29 @@ def assign_gear_shader(objects=None):
         bpy.data.materials.get(f"D2ReticleShader").use_fake_user = True
         bpy.data.materials.get(f"D2GearShader").use_fake_user = True
 
-    for obj in (objects if objects is not None else Helpers.GetCfgParts()):
-        if not os.path.exists(os.path.join(globals.AssetsPath, f'Materials/{obj.material_slots[0].name}.json')):
-            Helpers.log(f"File {os.path.join(globals.AssetsPath, f'Materials/{obj.material_slots[0].name}.json')} doesnt exist!")
+    if objects is None:
+        objects = Helpers.GetCfgParts()
+    material_data = {} # material json per material name, parts often share one
+    for obj in objects:
+        if not obj.material_slots:
             continue
 
-        # Assign gear shader          
+        material_name = obj.material_slots[0].name
+        if material_name not in material_data:
+            json_path = os.path.join(globals.AssetsPath, f'Materials/{material_name}.json')
+            if os.path.exists(json_path):
+                with open(json_path, 'r') as f:
+                    material_data[material_name] = json.load(f)
+            else:
+                Helpers.log(f"File {json_path} doesnt exist!")
+                material_data[material_name] = None
+
+        data = material_data[material_name]
+        if data is None:
+            continue
+
+        # Assign gear shader
         # Kinda dumb way to check but it works
-        with open(os.path.join(globals.AssetsPath, f'Materials/{obj.material_slots[0].name}.json'), 'r') as f:
-            data = json.load(f)
 
         CanAssign = obj.type == 'MESH' and (any("GEAR" in item for item in data["Scopes"]) if globals.Type == "API" else any("Gear" in item for item in data["Externs"])) 
 
@@ -154,53 +177,37 @@ def assign_gear_shader(objects=None):
                     #     # Remove the unconnected shader from the material before assigning it
                     #     bpy.data.materials[slot.material.name].node_tree.nodes.remove(bpy.data.materials[slot.material.name].node_tree.nodes.get(f'{globals.Cfg["MeshName"]} Shader Preset'))
                     
-                    default_shader = bpy.data.materials[slot.material.name].node_tree.nodes.get(f'Shader Preset')
-                    default_shader.node_tree = bpy.data.node_groups[f'{globals.Cfg["MeshName"]}']
-                    
-                    # TODO: Clean this up
-                    for DyeslotsrgbConnections in bpy.context.active_object.active_material.node_tree.nodes:
-                        if DyeslotsrgbConnections.name == "Dyemap Texture":
-                            for DyemapTOshaderpresetCONNECTIONS in bpy.context.active_object.active_material.node_tree.nodes:
-                                if DyemapTOshaderpresetCONNECTIONS.name == "Shader Preset":
-                                    bpy.context.active_object.active_material.node_tree.links.new(DyeslotsrgbConnections.outputs[0], DyemapTOshaderpresetCONNECTIONS.inputs[0])
-                                    bpy.context.active_object.active_material.node_tree.links.new(DyeslotsrgbConnections.outputs[1], DyemapTOshaderpresetCONNECTIONS.inputs[1])
+                    links = slot.material.node_tree.links
+                    preset = nodes.get("Shader Preset")
+                    preset.node_tree = bpy.data.node_groups[f'{globals.Cfg["MeshName"]}']
 
-                    for ShaderPreset in bpy.context.active_object.active_material.node_tree.nodes:
-                        if ShaderPreset.name == "Shader Preset":
-                            for MainShader in bpy.context.active_object.active_material.node_tree.nodes:
-                                if MainShader.name == "D2 PlayerGear Shader":
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Dye Color A'], MainShader.inputs['Dye Color A'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Dye Color B'], MainShader.inputs['Dye Color B'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Wear Remap_A'], MainShader.inputs['Wear Remap_A'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Wear Remap_B'], MainShader.inputs['Wear Remap_B'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Roughness Remap_A'], MainShader.inputs['Roughness Remap_A'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Roughness Remap_B'], MainShader.inputs['Roughness Remap_B'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Roughness Remap_C'], MainShader.inputs['Roughness Remap_C'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Detail Diffuse'], MainShader.inputs['Detail Diffuse'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Detail Normal'], MainShader.inputs['Detail Normal'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Detail Blends'], MainShader.inputs['Detail Blends'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Worn Detail Blends'], MainShader.inputs['Worn Detail Blends'])
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Iridescence, Fuzz, Transmission'], MainShader.inputs['Iridescence, Fuzz, Transmission'])    
-                                    bpy.context.active_object.active_material.node_tree.links.new(ShaderPreset.outputs['Emission'], MainShader.inputs['Emission'])
+                    dyemap_node = nodes.get("Dyemap Texture") # removed above when there's no dyemap
+                    if dyemap_node:
+                        links.new(dyemap_node.outputs[0], preset.inputs[0])
+                        links.new(dyemap_node.outputs[1], preset.inputs[1])
+
+                    main_shader = nodes.get("D2 PlayerGear Shader")
+                    if main_shader:
+                        for socket in gear_preset_sockets:
+                            links.new(preset.outputs[socket], main_shader.inputs[socket])
 
     ######
-    for obj in bpy.data.objects: # Remove any duplicate materials that may have been created
-        for slt in obj.material_slots:
-            part = slt.name.rpartition('.')
-            if part[2].isnumeric() and part[0] in bpy.data.materials:
-                slt.material = bpy.data.materials.get(part[0])
+    Helpers.dedupe_material_slots(objects) # Remove any duplicate materials that may have been created
 
 # Fix up duplicate bones/vertex groups
 def fix_dupe_bones():
-    main_armature = Helpers.GetCfgParts()[0].find_armature()
+    parts = Helpers.GetCfgParts()
+    if not parts:
+        return
+    main_armature = parts[0].find_armature()
     if main_armature is None:
         return
-    
+
     old_armature_name = main_armature.name # fbx actions are named after it
     main_armature.name = globals.Cfg["MeshName"]
 
     # Rename vertex weights if there are duplicates
-    for obj in Helpers.GetCfgParts():
+    for obj in parts:
         if obj.type == 'MESH':
             vertex_groups = obj.vertex_groups
             for group in vertex_groups:
@@ -210,7 +217,7 @@ def fix_dupe_bones():
                         group.name = group.name.split(".")[0]
 
     # Remove duplicate skeletons and parent everything to the main skeleton
-    for obj in Helpers.GetCfgParts():
+    for obj in parts:
         obj_armature = obj.find_armature()
         if obj_armature and (obj_armature == main_armature):
             continue
@@ -230,7 +237,7 @@ def rename_bones(armature_obj, old_armature_name):
     bpy.ops.object.mode_set(mode='EDIT')
     armature = armature_obj.data
     renamed = {}
-    for bone in armature.edit_bones:
+    for bone in list(armature.edit_bones): # copy, bones get removed while looping
         if "." in bone.name:
             part = bone.name.split(".")
             if part[1].isnumeric():
@@ -283,11 +290,7 @@ def import_first_person_rig(self):
         bpy.ops.object.transform_apply()
     bpy.ops.object.select_all(action='DESELECT')
 
-    for obj in meshes:
-        for slt in obj.material_slots:
-            part = slt.name.rpartition('.')
-            if part[2].isnumeric() and part[0] in bpy.data.materials:
-                slt.material = bpy.data.materials.get(part[0])
+    Helpers.dedupe_material_slots(meshes)
 
     # same shader as the main parts
     if self.use_import_materials and meshes:

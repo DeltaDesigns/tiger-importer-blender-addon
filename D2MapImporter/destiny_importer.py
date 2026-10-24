@@ -1,4 +1,4 @@
-from .__init__ import bl_info
+from . import bl_info # not .__init__, that loads __init__.py a second time as its own module
 import bpy
 from bpy.props import *
 import json
@@ -6,6 +6,7 @@ import os
 import requests
 import json
 import time
+import threading
 
 from .helper_functions import *
 from .materials import *
@@ -123,7 +124,13 @@ class ImportDestinyCfg(Operator, ImportHelper):
             description="Uses Geometry Nodes for mesh instances (Statics and Decorators)",
             default=False,
             )
-    
+
+    use_collection_instancing: BoolProperty(
+            name="Use Collection Instancing",
+            description="Places map meshes as collection instances using empties.\nMay be slighty faster to import and lighter in the viewport, use Make Instances Real to edit a single object.",
+            default=False,
+            )
+
     debug_logs: BoolProperty(
             name="Debug Logs",
             description="Print debug logs to the console",
@@ -133,12 +140,12 @@ class ImportDestinyCfg(Operator, ImportHelper):
     def draw(self, context):
         layout = self.layout
 
-        box = layout.box()
         if update_available:
-            box = layout.box()
-            box.label(text="Update available: " + latest_version)
-            box.operator("wm.url_open", text="Get Latest Release").url = "https://github.com/DeltaDesigns/d2-map-importer-addon/releases/latest"
+            update_box = layout.box()
+            update_box.label(text="Update available: " + latest_version)
+            update_box.operator("wm.url_open", text="Get Latest Release").url = "https://github.com/DeltaDesigns/d2-map-importer-addon/releases/latest"
 
+        box = layout.box()
         box.label(text="Current Version: " + current_version)
         box.label(text="Options:")
         box.prop(self, 'rename_bones')
@@ -149,6 +156,7 @@ class ImportDestinyCfg(Operator, ImportHelper):
         box.prop(self, 'light_intensity_override')
         box.prop(self, 'override_light_color')
         box.prop(self, 'use_geo_node_instancing')
+        box.prop(self, 'use_collection_instancing')
 
         box2 = layout.box()
         box2.label(text="Misc:")
@@ -167,6 +175,11 @@ class ImportDestinyCfg(Operator, ImportHelper):
         ExportType = "Map"
         print_debug_logs = self.debug_logs
         pending_attachments.clear()
+        texture_dir_cache.clear()
+        processed_materials.clear()
+        loaded_cfgs.clear()
+        instance_source_collections.clear()
+        mesh_uses_left.clear()
 
         start_time = time.time()
         # Deselect all objects just in case
@@ -178,8 +191,8 @@ class ImportDestinyCfg(Operator, ImportHelper):
             
             file_sizes = [(file, os.path.getsize(os.path.join(dirname, file.name))) for file in self.files]
             # Import Terrain first since it needs its transforms modified outside of instancing, then do biggest to smallest
-            sorted_files = sorted(file_sizes, key=lambda x: (0 if "Terrain" in x[0].name else 1, -x[1])) 
-    
+            sorted_files = sorted(file_sizes, key=lambda x: (0 if "Terrain" in x[0].name else 1, -x[1]))
+
             # If a map, import every model from every cfg to save as much performance as possible
             prepare_and_process_map(self, sorted_files)
             
@@ -202,7 +215,7 @@ class ImportDestinyCfg(Operator, ImportHelper):
                 #     bpy.data.objects.remove(obj, do_unlink=True)
                 bpy.data.collections.remove(collection, do_unlink=True)
 
-            # The final cleanup
+            # The final cleanup, purging orphans walks all of bpy.data so it only runs once here
             cleanup()
 
         end_time = time.time()
@@ -214,7 +227,7 @@ class ImportDestinyCfg(Operator, ImportHelper):
         return {'FINISHED'} # Lets Blender know the operator finished successfully.
 
 # Import everything model needed first for performance reasons, if importing a map
-hash_import_list = []
+hash_import_list = set()
 def PrepareMapImport(self, file):
     Helpers.log(f"Starting import on {ExportType} {Type}: {Name}")
 
@@ -235,20 +248,22 @@ def PrepareMapImport(self, file):
 
         # Import FBX files for all meshes
         i = 1
-        cleanup_factor = 0
         total = len(Cfg["Instances"])
         for mesh, instances in Cfg["Instances"].items():
             if mesh not in Cfg["Parts"]:
                 Helpers.log(f'Mesh not in Cfg parts, this shouldnt happen!')
                 continue
 
-            Helpers.log(f'{i}/{total}')
+            # counted for every cfg, DoImport counts it back down while instancing
+            mesh_uses_left[mesh] = mesh_uses_left.get(mesh, 0) + 1
+
+            Helpers.log_debug(f'{i}/{total}')
             i+=1
             if mesh in hash_import_list:
                 Helpers.log_debug(f'Mesh {mesh} already in hash_import_list (scene), skipping')
                 continue
             
-            hash_import_list.append(mesh)
+            hash_import_list.add(mesh)
             
             if Cfg["Type"] != "Terrain":
                 if not ImportFBX(self, os.path.join(f'{AssetsPath}', f"Models/{Type}/{mesh}.fbx")):
@@ -259,24 +274,19 @@ def PrepareMapImport(self, file):
                     if not ImportFBX(self, file):
                         continue
 
-            cleanup_factor+=1
-            if cleanup_factor >= 425: # TODO this might be stupid
-                cleanup()
-                cleanup_factor = 0
-
-        if self.merge_meshes: 
+        if self.merge_meshes:
             CombineMeshes()
 
-        cleanup()
-        
 # Where all the fun happens..
 def DoImport(self):
     # Merge meshes/create instances for maps only
     if Is_Map(ExportType):
-        area = next(area for area in bpy.context.screen.areas if area.type == 'VIEW_3D')
-        space = area.spaces.active
-        space.clip_start = 0.1 
-        space.clip_end = 1000000.0  
+        screen = bpy.context.screen
+        area = next((area for area in screen.areas if area.type == 'VIEW_3D'), None) if screen else None
+        if area: # no 3D View when running in the background
+            space = area.spaces.active
+            space.clip_start = 0.1
+            space.clip_end = 1000000.0
 
         # Make a collection with the name of the imported fbx for the objects
         if bpy.data.collections.get(str(Name)):
@@ -291,9 +301,9 @@ def DoImport(self):
         for mesh, instances in Cfg["Instances"].items():
             if mesh not in Cfg["Parts"]:
                 continue
-            
+
             # Instance the meshes with the necessary transformations
-            Helpers.log(f'Instancing {mesh}')
+            Helpers.log_debug(f'Instancing {mesh}')
             instance_mesh(self, mesh, instances)
 
     else:
@@ -315,8 +325,11 @@ def DoImport(self):
         else:
             # Apply transforms if API type
             if Is_Gear(Type) or Is_Anim(Type):
-                for obj in GetCfgParts():
+                # one apply for all parts, on top of whatever the fbx import left selected (its armatures)
+                parts = GetCfgParts()
+                for obj in parts:
                     obj.select_set(True)
+                if parts:
                     bpy.ops.object.transform_apply()
 
             # object transform offsets
@@ -333,7 +346,7 @@ def DoImport(self):
                             armature.rotation_mode = 'QUATERNION'
                             armature.rotation_quaternion = quat @ obj.rotation_quaternion
                             break
-                        
+
                         obj.location += mathutils.Vector(location)
                         obj.rotation_mode = 'QUATERNION'
                         obj.rotation_quaternion = quat @ obj.rotation_quaternion
@@ -360,9 +373,6 @@ def DoImport(self):
     if "Terrain" in Type and "TerrainDyemaps" in Cfg:
         add_terrain_dyemaps(self)
 
-    # Final cleanup
-    cleanup()
-
 #--------------------------------------------------------------------#    
 icons_dir = os.path.join(os.path.dirname(__file__), "icons")
 custom_icon_col = {}
@@ -371,38 +381,32 @@ custom_icon_col = {}
 update_available = False
 patch_notes = ""
 latest_version = ""
+current_version = '.'.join(map(str, bl_info["version"])) # set up front, the dialog draws it even when the update check fails
 
+# Runs on a background thread so a slow or missing connection doesn't hold up Blender's startup
 def check_for_updates():
     global latest_version
     global patch_notes
-    global current_version
+    global update_available
 
     repo_name = 'DeltaDesigns/d2-map-importer-addon'
     api_url = f'https://api.github.com/repos/{repo_name}/releases/latest'
     headers = {'Accept': 'application/vnd.github.v3+json'}
 
     try:
-        response = requests.get(api_url, headers=headers)
+        response = requests.get(api_url, headers=headers, timeout=5)
         response.raise_for_status()
         data = json.loads(response.text)
-        latest_version = data['tag_name']
-        patch_notes = data['body']
-    except:
-        # something went wrong with the API request, handle the error
+        latest = data['tag_name'].replace("v", "")
+        latest_tuple = tuple(int(x) for x in latest.split("."))
+    except Exception:
+        # something went wrong with the API request or the tag isn't a version, just skip the check
         return
 
-    current_version = '.'.join(map(str, bl_info["version"]))
-    current_version = current_version.replace("v", "")
-    latest_version = latest_version.replace("v", "")
-
-    cur_version_parts = current_version.split(".")
-    cur_version_number = int(cur_version_parts[0]) * 100 + int(cur_version_parts[1]) * 10 + int(cur_version_parts[2])
-
-    lat_version_parts = latest_version.split(".")
-    lat_version_number = int(lat_version_parts[0]) * 100 + int(lat_version_parts[1]) * 10 + int(lat_version_parts[2])
-
-    if lat_version_number > cur_version_number:
-        return True
+    latest_version = latest
+    patch_notes = data['body']
+    # compare as tuples, (1, 10, 0) > (1, 9, 0)
+    update_available = latest_tuple > tuple(bl_info["version"])
 
 def menu_func_import(self, context):
     self.layout.operator(ImportDestinyCfg.bl_idname, text="Tiger Importer (.cfg)", icon_value=custom_icon_col["import"]['D2ICON'].icon_id)
@@ -417,8 +421,9 @@ def register_importer():
     bpy.utils.register_class(ImportDestinyCfg)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
-    global update_available 
-    update_available = check_for_updates()
+    # 4.2+ has an "Allow Online Access" preference add-ons should respect, older versions have no such setting
+    if getattr(bpy.app, "online_access", True):
+        threading.Thread(target=check_for_updates, daemon=True).start()
 
 def unregister_importer():
     bpy.utils.previews.remove(custom_icon_col["import"])
