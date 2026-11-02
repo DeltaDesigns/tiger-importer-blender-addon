@@ -30,6 +30,22 @@ def ImportFBX(self, modelPath):
         Helpers.log(f"Could not find FBX: {modelPath}")
         return False
 
+def ImportCombinedFBX(self, modelPath):
+    before = set(bpy.data.objects)
+    before_names = {obj.name for obj in before}
+    if not ImportFBX(self, modelPath):
+        return False
+
+    removed = 0
+    for obj in [o for o in bpy.data.objects if o not in before]:
+        base = StripNameSuffix(obj.name)
+        if base != obj.name and base in before_names:
+            bpy.data.objects.remove(obj, do_unlink=True)
+            removed += 1
+    if removed:
+        Helpers.log_debug(f'Removed {removed} objects already imported from another map')
+    return True
+
 def ShowMessageBox(message = "", title = "Message Box", icon = 'INFO'):
     def draw(self, context):
         self.layout.label(text=message)

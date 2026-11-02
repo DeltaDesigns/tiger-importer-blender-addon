@@ -264,6 +264,11 @@ def PrepareMapImport(self, file):
 
         bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection.children["Import_Temp"]
 
+        # Newer Charm exports can put every static of the map in one fbx, much faster than an import per mesh
+        combined = Cfg.get("CombinedFbx") == True
+        if combined:
+            ImportCombinedFBX(self, os.path.join(f'{AssetsPath}', f"Models/{Type}/{Cfg['MeshName']}.fbx"))
+
         # Import FBX files for all meshes
         i = 1
         total = len(Cfg["Instances"])
@@ -282,6 +287,9 @@ def PrepareMapImport(self, file):
                 continue
             
             hash_import_list.add(mesh)
+
+            if combined:
+                continue # already imported with the rest of the map
             
             if Cfg["Type"] != "Terrain":
                 if not ImportFBX(self, os.path.join(f'{AssetsPath}', f"Models/{Type}/{mesh}.fbx")):
