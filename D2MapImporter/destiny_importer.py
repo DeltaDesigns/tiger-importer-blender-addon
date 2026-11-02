@@ -210,10 +210,10 @@ class ImportDestinyCfg(Operator, ImportHelper):
             sorted_files = sorted(file_sizes, key=lambda x: (0 if "Terrain" in x[0].name else 1, -x[1]))
 
             # If a map, import every model from every cfg to save as much performance as possible
-            prepare_and_process_map(self, sorted_files)
-            
+            skipped_files = prepare_and_process_map(self, sorted_files)
+
             # This does the actual instancing after everything needed has been imported
-            process_instancing(self, sorted_files)
+            process_instancing(self, sorted_files, skipped_files)
 
             apply_attachments()
 
@@ -254,10 +254,6 @@ def PrepareMapImport(self, file):
     Helpers.log(f"Starting import on {ExportType} {Type}: {Name}")
 
     if Cfg["ExportType"] == "Map":
-        if bpy.data.collections.get(str(Name)):
-            Helpers.log(f"Collection {str(Name)} already exists, skipping...")
-            return
-
         if Game == TigerGame.MARATHON:
             Helpers.log("!!!!Importing a Marathon map can take a VERY VERY LONG TIME!!!!")
 
@@ -273,7 +269,7 @@ def PrepareMapImport(self, file):
         total = len(Cfg["Instances"])
         for mesh, instances in Cfg["Instances"].items():
             if mesh not in Cfg["Parts"]:
-                Helpers.log(f'Mesh not in Cfg parts, this shouldnt happen!')
+                Helpers.log(f'Mesh {mesh} not in Cfg ({Cfg["MeshName"]}) parts, this shouldnt happen!')
                 continue
 
             # counted for every cfg, DoImport counts it back down while instancing
@@ -311,13 +307,13 @@ def DoImport(self):
             space.clip_end = 1000000.0
 
         # Make a collection with the name of the imported fbx for the objects
-        if bpy.data.collections.get(str(Name)):
-            Helpers.log(f"Collection {str(Name)} already exists, skipping...")
-            return
-
-        bpy.data.collections.new(str(Name))
-        bpy.context.scene.collection.children.link(bpy.data.collections[str(Name)])
-        bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection.children[str(Name)]
+        collection = bpy.data.collections.get(str(Name))
+        if collection is None:
+            collection = bpy.data.collections.new(str(Name))
+            bpy.context.scene.collection.children.link(collection)
+        elif collection.name not in bpy.context.scene.collection.children:
+            bpy.context.scene.collection.children.link(collection)
+        bpy.context.view_layer.active_layer_collection = FindLayerCollection(bpy.context.view_layer.layer_collection, collection)
 
         # Loop through and instance meshes
         for mesh, instances in Cfg["Instances"].items():

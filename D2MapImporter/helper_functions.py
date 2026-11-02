@@ -63,6 +63,11 @@ def add_to_collection(name):
 def StripNameSuffix(name):
     return re.sub(r'\.\d{3,}$', '', name)
 
+def CollectionHasContent(name):
+    # an empty collection (a failed or cancelled earlier import) doesn't count as imported
+    collection = bpy.data.collections.get(name)
+    return collection is not None and (len(collection.objects) > 0 or len(collection.children) > 0)
+
 def GetImportCollection():
     globals.ImportCollection = None
     name = str(globals.Name)
@@ -385,6 +390,8 @@ def load_cfg(file_path):
 
 def prepare_and_process_map(self, sorted_files):
     """Prepare and process files for map import."""
+    skipped = set()
+    queued_names = set()
     for file, size in sorted_files:
         # Skip files based on conditions
         if file.name == "":
@@ -402,8 +409,18 @@ def prepare_and_process_map(self, sorted_files):
 
         set_cfg_globals(cfg, log_info=True)
 
+        if Is_Map(globals.ExportType):
+            name = str(globals.Name)
+            if name in queued_names or CollectionHasContent(name):
+                Helpers.log(f"Collection {name} already exists, skipping...")
+                skipped.add(file.name)
+                continue
+            queued_names.add(name)
+
         # Prepare map import first
         globals.PrepareMapImport(self, file)
+
+    return skipped
 
 def set_cfg_globals(cfg, log_info=False):
     """Point the importer globals at this cfg, both import passes need the same Game and AssetsPath."""
@@ -427,11 +444,11 @@ def set_cfg_globals(cfg, log_info=False):
     if log_info:
         Helpers.log(f"AssetsPath: {globals.AssetsPath}")
 
-def process_instancing(self, sorted_files):
+def process_instancing(self, sorted_files, skipped=()):
     """Process the instancing logic after importing models."""
     for file, size in sorted_files:
         # Skip files based on conditions
-        if file.name == "":
+        if file.name == "" or file.name in skipped:
             continue
 
         set_cfg_globals(load_cfg(os.path.join(globals.FilePath, file.name)))
