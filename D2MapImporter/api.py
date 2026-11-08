@@ -247,6 +247,7 @@ def rename_bones(armature_obj, old_armature_name):
             old_name = bone.name
             if len(bone.name) == 7: # stupid stupid stupid stupid
                 bone.name = bone.name + "0"
+                
             bone.name = mapped_bone_name(bone.name) or bone.name
             if bone.name != old_name:
                 renamed[old_name] = bone.name
@@ -265,13 +266,16 @@ def import_first_person_rig(self):
 
     collection = bpy.data.collections.new(f"{globals.Name} First Person")
     parent_collection.children.link(collection)
+
     layer_collection = find_layer_collection(bpy.context.view_layer.layer_collection, collection)
     previous_collection = bpy.context.view_layer.active_layer_collection
+
     if layer_collection:
         bpy.context.view_layer.active_layer_collection = layer_collection
 
     objects_before = set(bpy.data.objects)
     bpy.ops.object.select_all(action='DESELECT')
+
     imported = Helpers.ImportFBX(self, path)
     bpy.context.view_layer.active_layer_collection = previous_collection
     if not imported:
@@ -285,9 +289,11 @@ def import_first_person_rig(self):
     bpy.ops.object.select_all(action='DESELECT')
     for obj in meshes:
         obj.select_set(True)
+
     if meshes:
         bpy.context.view_layer.objects.active = meshes[0]
         bpy.ops.object.transform_apply()
+
     bpy.ops.object.select_all(action='DESELECT')
 
     Helpers.dedupe_material_slots(meshes)
@@ -301,8 +307,96 @@ def import_first_person_rig(self):
 
     old_armature_name = armature.name
     armature.name = f'{globals.Cfg["MeshName"]} First Person'
+
     rename_bones(armature, old_armature_name)
+    add_weapon_points(armature)
+
     Helpers.log(f"Imported first person rig {armature.name}")
+
+def find_rig_bone(armature, name, game_head):
+    names = [name]
+    if len(name) == 7:
+        names.append(name + "0")
+
+    mapped = mapped_bone_name(name)
+    if mapped:
+        names.append(mapped)
+
+    candidates = [bone for bone in armature.data.bones if any(bone.name == n or bone.name.startswith(n + ".") for n in names)]
+    if not candidates:
+        return None
+
+    expected = game_head.length
+    if expected < 1e-4:
+        return candidates[0]
+
+    def mismatch(bone):
+        ratio = bone.head_local.length / expected
+        return abs(ratio - 1) if ratio > 1e-6 else 1e9
+    
+    best = min(candidates, key=mismatch)
+    return best
+
+def add_weapon_points(armature):
+    points = [p for p in globals.Cfg.get("WeaponPoints", []) if p.get("RigBone") and p.get("BindTranslation")]
+    if not points:
+        return
+
+    from bpy_extras.io_utils import axis_conversion
+
+    placed = [(p, find_rig_bone(armature, p["RigBone"], mathutils.Vector(p["RigBoneHead"]))) for p in points]
+    placed = [(p, bone) for p, bone in placed if bone is not None]
+    if not placed:
+        Helpers.log("Weapon points: none of their bones are in the first person rig")
+        return
+
+    reference = [(mathutils.Vector(p["RigBoneHead"]), bone.head_local.copy()) for p, bone in placed]
+    best = None
+
+    for rotation in (axis_conversion(from_forward='-X', from_up='Z').to_3x3(), mathutils.Matrix.Identity(3)):
+        scales = [head.length / (rotation @ game).length for game, head in reference if (rotation @ game).length > 1e-4]
+        if not scales:
+            continue
+        scale = sum(scales) / len(scales)
+        error = max((rotation @ game * scale - head).length for game, head in reference)
+        if best is None or error < best[0]:
+            best = (error, rotation, scale)
+
+    if best is None:
+        Helpers.log("Weapon points: couldnt work out the import's orientation")
+        return
+
+    error, rotation, scale = best
+
+    previous = bpy.context.view_layer.objects.active
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    
+    edit_bones = armature.data.edit_bones
+
+    for point, rig_bone in placed:
+        name = f'Point_{point["Name"] or format(point["Hash"], "08X")}'
+        if name in edit_bones:
+            continue
+
+        x, y, z, w = point["BindRotation"]
+        orientation = rotation @ mathutils.Quaternion((w, x, y, z)).to_matrix()
+        matrix = mathutils.Matrix.Translation(rotation @ mathutils.Vector(point["BindTranslation"]) * scale) @ orientation.to_4x4()
+
+        edit_bone = edit_bones.new(name)
+        edit_bone.head = (0, 0, 0)
+        edit_bone.tail = (0, 0.05 * scale, 0)
+        edit_bone.matrix = matrix
+        edit_bone.parent = edit_bones.get(rig_bone.name)
+        edit_bone.use_connect = False
+        edit_bone.use_deform = False
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+    if previous:
+        bpy.context.view_layer.objects.active = previous
+
+    Helpers.log(f"Added {len(placed)} weapon point bones")
+
 
 def find_layer_collection(layer_collection, collection):
     if layer_collection.collection == collection:
@@ -320,7 +414,8 @@ def rename_action_bones(armature_obj, old_armature_name, renamed):
     actions = [action for action in bpy.data.actions if action.name.startswith(f"{old_armature_name}|")]
     if armature_obj.animation_data and armature_obj.animation_data.action and armature_obj.animation_data.action not in actions:
         actions.append(armature_obj.animation_data.action)
-    if not actions: # fall back to any action using these bones
+
+    if not actions:
         actions = list(bpy.data.actions)
 
     prefix = 'pose.bones["'
@@ -329,6 +424,7 @@ def rename_action_bones(armature_obj, old_armature_name, renamed):
             path = fcurve.data_path
             if not path.startswith(prefix):
                 continue
+
             name, _, rest = path[len(prefix):].partition('"]')
             if name in renamed:
                 fcurve.data_path = f'{prefix}{renamed[name]}"]{rest}'
@@ -337,11 +433,13 @@ def rename_action_bones(armature_obj, old_armature_name, renamed):
             if group.name in renamed:
                 group.name = renamed[group.name]
 
+
 def action_channelbags(action):
     for layer in getattr(action, "layers", []):
         for strip in layer.strips:
             for channelbag in getattr(strip, "channelbags", []):
                 yield channelbag
+
 
 def action_fcurves(action):
     channelbags = list(action_channelbags(action))
@@ -351,6 +449,7 @@ def action_fcurves(action):
     elif hasattr(action, "fcurves"):
         yield from action.fcurves
 
+
 def action_groups(action):
     channelbags = list(action_channelbags(action))
     if channelbags:
@@ -359,6 +458,7 @@ def action_groups(action):
     elif hasattr(action, "groups"):
         yield from action.groups
 
+
 def mapped_bone_name(name):
     if not name or not checkHex(name):
         return None
@@ -366,6 +466,7 @@ def mapped_bone_name(name):
         name = name + "0"
     key = str(int.from_bytes(bytes.fromhex(name), byteorder= "little" if globals.Game == globals.TigerGame.DESTINY else "big"))
     return name_mappings.get(key)
+
 
 def checkHex(s):
     for ch in s:
