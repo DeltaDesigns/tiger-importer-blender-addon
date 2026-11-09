@@ -13,6 +13,7 @@ from . import helper_functions as Helpers
 def ImportFBX(self, modelPath):
     if os.path.isfile(modelPath):
         Helpers.log_debug(f'Importing FBX {modelPath}')
+        before = set(bpy.data.objects)
         bpy.ops.import_scene.fbx(filepath=modelPath,
                                 use_anim=self.import_animations,
                                 use_custom_normals= not any(x in globals.Type for x in ['Decorators', 'SpeedTrees']), 
@@ -23,7 +24,9 @@ def ImportFBX(self, modelPath):
                                 use_manual_orientation=True, 
                                 axis_up='Z', 
                                 axis_forward='-X')# force_connect_children=True)
-        
+
+        DisconnectBones([o for o in bpy.data.objects if o not in before])
+
         #add_to_collection(globals.Name) 
         return True
     else:
@@ -59,6 +62,34 @@ def Is_Gear(ExportType):
 
 def Is_Anim(ExportType):
     return "Emote" in ExportType
+
+def DisconnectBones(armatures):
+    armatures = [a for a in armatures if a.type == 'ARMATURE' and any(b.use_connect for b in a.data.bones)]
+    if not armatures:
+        return
+
+    view_layer = bpy.context.view_layer
+    previous = view_layer.objects.active
+    previous_mode = previous.mode if previous else 'OBJECT'
+
+    if previous and previous.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    try:
+        for armature in armatures:
+            view_layer.objects.active = armature
+            bpy.ops.object.mode_set(mode='EDIT')
+            for edit_bone in armature.data.edit_bones:
+                edit_bone.use_connect = False
+
+            bpy.ops.object.mode_set(mode='OBJECT')
+    finally:
+        if bpy.context.object and bpy.context.object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+            
+        view_layer.objects.active = previous
+        if previous and previous_mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode=previous_mode)
 
 def add_to_collection(name):
     # List of object references
