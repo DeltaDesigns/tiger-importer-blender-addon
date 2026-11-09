@@ -17,9 +17,10 @@ How to use: https://github.com/DeltaDesigns/Charm/wiki/Blender-Importing
 - Compatible with DARE/DCG skeletons and IK Player Skeleton
 - Geometry node instancing for map statics and decorators.
 - Custom camera culling for map decorators (Blender 5.0+)
+- Animations (Destiny only)
 
 # What it CAN'T do:
-- Materials for anything that isnt player gear. Due to the inconsistency of in-game shaders, they will have to be manually recreated
+- Materials for anything that isnt player gear. Due to the inconsistency/complexity of in-game shaders, they will have to be manually recreated
 - Map decals (Projected decals, you can import simple planes at decal locations)
 - File your taxes
 - Uhhhhh probably something else I can't think of right now
